@@ -4,7 +4,9 @@ import org.springframework.core.io.Resource;
 import org.springframework.web.multipart.MultipartFile;
 
 public interface FileService {
+    @Deprecated
     String storeFile(MultipartFile multipartFile, String location);
-    Resource loadFileAsResource(String location);
 
+    @Deprecated
+    Resource loadFileAsResource(String location);
 }

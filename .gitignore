@@ -9,7 +9,13 @@ src/main/java/com/example/Spotify/model/songs_cover/
 src/main/java/com/example/Spotify/model/albums_cover/
 src/main/java/com/example/Spotify/model/userImage/
 
+Dockerfile
+docker-compose.yml
+mvnw
+mvnw.cmd
 
+.env
+.gitignore
 ### STS ###
 .apt_generated
 .classpath

@@ -7,11 +7,14 @@ import com.example.Spotify.exceptions.ResourceNotFoundException;
 import com.example.Spotify.model.*;
 import com.example.Spotify.repository.*;
 import com.example.Spotify.service.FileService;
+import com.example.Spotify.service.FileStorageService;
 import com.example.Spotify.service.SongService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.net.MalformedURLException;
@@ -21,32 +24,86 @@ import java.nio.file.Paths;
 import java.util.*;
 
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class SongServiceImpl implements SongService {
 
+    @Deprecated
     private static final String songsLocation = "src/main/java/com/example/Spotify/model/songs/";
+    @Deprecated
     private static final String songsCoverLocation = "src/main/java/com/example/Spotify/model/songs_cover/";
 
     private final FileService fileService;
+    private final FileStorageService fileStorageService;
     private final UserRepository userRepository;
     private final SongInfoRepository songInfoRepository;
     private final LikeDislikeSongRepository likeDislikeSongRepository;
 
-
     @Override
-    public void addSongAndCover(MultipartFile songFile, MultipartFile coverImageFile, String name) {
-            System.out.println(fileService.storeFile(songFile, songsLocation + name + ".mp3"));
-            System.out.println(fileService.storeFile(coverImageFile, songsCoverLocation + name + ".jpg"));
+    @Transactional
+    public SongUploadResult uploadSongWithCover(MultipartFile songFile, MultipartFile coverImageFile, String title) {
+        try {
+            log.info("Starting upload process for song: {}", title);
+
+            // Upload audio file
+            FileStorageService.FileUploadResult audioResult = fileStorageService.storeAudioFile(songFile, title);
+            if (!audioResult.isSuccess()) {
+                log.error("Failed to upload audio file: {}", audioResult.getErrorMessage());
+                return SongUploadResult.error("Audio upload failed: " + audioResult.getErrorMessage());
+            }
+
+            // Upload cover image
+            FileStorageService.FileUploadResult coverResult = fileStorageService.storeImageFile(coverImageFile, title);
+            if (!coverResult.isSuccess()) {
+                log.error("Failed to upload cover image: {}", coverResult.getErrorMessage());
+                // Clean up audio file
+                fileStorageService.deleteFile(audioResult.getFilePath());
+                return SongUploadResult.error("Cover upload failed: " + coverResult.getErrorMessage());
+            }
+
+            // Create song info in database
+            SongInfo songInfo = SongInfo.builder()
+                    .title(title)
+                    .songURL(audioResult.getFilePath())
+                    .songCoverURL(coverResult.getFilePath())
+                    .likes(0)
+                    .dislikes(0)
+                    .playCount(0)
+                    .publishDate(new Date())
+                    .isPremium(false)
+                    .likedDislikedSongs(new ArrayList<>())
+                    .songPlaylistRelations(new ArrayList<>())
+                    .build();
+
+            songInfo = songInfoRepository.save(songInfo);
+
+            log.info("Song uploaded successfully: {} with ID: {}", title, songInfo.getId());
+            return SongUploadResult.success(songInfo);
+
+        } catch (Exception e) {
+            log.error("Unexpected error during song upload: {}", title, e);
+            return SongUploadResult.error("Upload failed due to unexpected error: " + e.getMessage());
+        }
     }
 
     @Override
+    @Deprecated
+    public void addSongAndCover(MultipartFile songFile, MultipartFile coverImageFile, String name) {
+        log.warn("Using deprecated addSongAndCover method");
+        System.out.println(fileService.storeFile(songFile, songsLocation + name + ".mp3"));
+        System.out.println(fileService.storeFile(coverImageFile, songsCoverLocation + name + ".jpg"));
+    }
+
+    @Override
+    @Deprecated
     public SongInfo addSongInfo(String title) {
+        log.warn("Using deprecated addSongInfo method");
         return songInfoRepository.save(
             SongInfo.builder()
                     .title(title)
-                    .songCoverURL(songsLocation + title + ".jpg")
-                    .songURL(songsCoverLocation + title + ".mp3")
+                    .songCoverURL(songsCoverLocation + title + ".jpg")
+                    .songURL(songsLocation + title + ".mp3")
                     .likes(0)
                     .dislikes(0)
                     .playCount(0)
@@ -60,21 +117,45 @@ public class SongServiceImpl implements SongService {
 
     @Override
     public SongPlayDTO streamSong(Long songId) {
-        String songName = getSongNameById(songId);
-        Resource songFile = loadFileAsResource(songName + ".mp3");
-        String songBase64 = encodeFileToBase64(songFile);
-        Resource coverFile = loadFileAsResource(songName + ".jpg");
-        String coverBase64 = encodeFileToBase64(coverFile);
-        return SongPlayDTO.builder()
-                .name(songName)
-                .song(songBase64)
-                .cover(coverBase64)
-                .build();
+        try {
+            Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
+            if (songInfoOpt.isEmpty()) {
+                throw new ResourceNotFoundException("Song not found with ID: " + songId);
+            }
+
+            SongInfo songInfo = songInfoOpt.get();
+
+            // Load audio file
+            Resource songFile = fileStorageService.loadFileAsResource(songInfo.getSongURL());
+            String songBase64 = encodeFileToBase64(songFile);
+
+            // Load cover file
+            Resource coverFile = fileStorageService.loadFileAsResource(songInfo.getSongCoverURL());
+            String coverBase64 = encodeFileToBase64(coverFile);
+
+            // Increment play count
+            songInfo.setPlayCount(songInfo.getPlayCount() + 1);
+            songInfoRepository.save(songInfo);
+
+            return SongPlayDTO.builder()
+                    .name(songInfo.getTitle())
+                    .song(songBase64)
+                    .cover(coverBase64)
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Error streaming song with ID: {}", songId, e);
+            throw new RuntimeException("Failed to stream song: " + e.getMessage());
+        }
     }
 
     @Override
     public String getSongNameById(Long songId) {
-        return songInfoRepository.findById(songId).get().getTitle();
+        Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
+        if (songInfoOpt.isEmpty()) {
+            throw new ResourceNotFoundException("Song not found with ID: " + songId);
+        }
+        return songInfoOpt.get().getTitle();
     }
 
 
@@ -198,13 +279,50 @@ public class SongServiceImpl implements SongService {
     }
 
     @Override
-    public String deleteSong (Long songId) {
-        Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
-        if(songInfoOpt.isEmpty()) {
-            System.out.println("Song Not found");
-            return "Song Not found";
+    @Transactional
+    public String deleteSong(Long songId) {
+        try {
+            Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
+            if (songInfoOpt.isEmpty()) {
+                log.warn("Attempted to delete non-existent song with ID: {}", songId);
+                return "Song not found";
+            }
+
+            SongInfo songInfo = songInfoOpt.get();
+            String songTitle = songInfo.getTitle();
+
+            // Delete associated files
+            boolean audioDeleted = true;
+            boolean coverDeleted = true;
+
+            if (songInfo.getSongURL() != null) {
+                audioDeleted = fileStorageService.deleteFile(songInfo.getSongURL());
+                if (!audioDeleted) {
+                    log.warn("Failed to delete audio file: {}", songInfo.getSongURL());
+                }
+            }
+
+            if (songInfo.getSongCoverURL() != null) {
+                coverDeleted = fileStorageService.deleteFile(songInfo.getSongCoverURL());
+                if (!coverDeleted) {
+                    log.warn("Failed to delete cover file: {}", songInfo.getSongCoverURL());
+                }
+            }
+
+            // Delete database record
+            songInfoRepository.deleteById(songId);
+
+            String result = "Song '" + songTitle + "' deleted successfully";
+            if (!audioDeleted || !coverDeleted) {
+                result += " (some files could not be deleted)";
+            }
+
+            log.info("Song deleted: {} (ID: {})", songTitle, songId);
+            return result;
+
+        } catch (Exception e) {
+            log.error("Error deleting song with ID: {}", songId, e);
+            return "Failed to delete song: " + e.getMessage();
         }
-        songInfoRepository.deleteById(songId);
-        return "Song deleted Successfully";
     }
 }

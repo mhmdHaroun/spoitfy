@@ -12,21 +12,25 @@ import com.example.Spotify.repository.ArtistRepository;
 import com.example.Spotify.repository.SongInfoRepository;
 import com.example.Spotify.service.AlbumService;
 import com.example.Spotify.service.FileService;
+import com.example.Spotify.service.FileStorageService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import java.io.FileOutputStream;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.Date;
 import java.util.Optional;
 
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AlbumServiceImpl implements AlbumService {
 
+    @Deprecated
     private static final String albumCoverLocation = "src/main/java/com/example/Spotify/model/albums_cover/";
 
     private final AlbumRepository albumRepository;
@@ -34,9 +38,60 @@ public class AlbumServiceImpl implements AlbumService {
     private final ArtistServiceImpl artistServiceImpl;
     private final SongInfoRepository songInfoRepository;
     private final FileService fileService;
+    private final FileStorageService fileStorageService;
 
     @Override
+    @Transactional
+    public AlbumUploadResult createAlbum(AlbumDTO albumDTO) {
+        try {
+            log.info("Creating album: {} for artist ID: {}", albumDTO.getName(), albumDTO.getArtistId());
+
+            // Validate artist exists
+            Optional<Artist> artistOpt = artistRepository.findById(albumDTO.getArtistId());
+            if (artistOpt.isEmpty()) {
+                return AlbumUploadResult.error("Artist not found with ID: " + albumDTO.getArtistId());
+            }
+            Artist artist = artistOpt.get();
+
+            // Check if album with same name already exists for this artist
+            Optional<Album> existingAlbum = albumRepository.findByNameAndArtistId(albumDTO.getName(), albumDTO.getArtistId());
+            if (existingAlbum.isPresent()) {
+                return AlbumUploadResult.error("Album with name '" + albumDTO.getName() + "' already exists for this artist");
+            }
+
+            // Upload album cover
+            FileStorageService.FileUploadResult coverResult = fileStorageService.storeAlbumCover(
+                albumDTO.getAlbumCover(), albumDTO.getName());
+
+            if (!coverResult.isSuccess()) {
+                log.error("Failed to upload album cover: {}", coverResult.getErrorMessage());
+                return AlbumUploadResult.error("Cover upload failed: " + coverResult.getErrorMessage());
+            }
+
+            // Create album entity
+            Album album = Album.builder()
+                    .name(albumDTO.getName())
+                    .isPremium(albumDTO.getIsPremium() != null ? albumDTO.getIsPremium() : false)
+                    .artist(artist)
+                    .coverURL(coverResult.getFilePath())
+                    .releaseDate(new Date())
+                    .build();
+
+            album = albumRepository.save(album);
+
+            log.info("Album created successfully: {} with ID: {}", albumDTO.getName(), album.getId());
+            return AlbumUploadResult.success(album);
+
+        } catch (Exception e) {
+            log.error("Unexpected error creating album: {}", albumDTO.getName(), e);
+            return AlbumUploadResult.error("Album creation failed due to unexpected error: " + e.getMessage());
+        }
+    }
+
+    @Override
+    @Deprecated
     public ResponseEntity<String> addAlbum(AlbumDTO albumDTO) {
+        log.warn("Using deprecated addAlbum method");
         Optional<Artist> artistOpt = artistRepository.findById(albumDTO.getArtistId());
         if (artistOpt.isEmpty()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Artist not found");
