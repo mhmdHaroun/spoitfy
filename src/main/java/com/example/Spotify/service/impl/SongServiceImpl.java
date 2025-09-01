@@ -1,11 +1,14 @@
 package com.example.Spotify.service.impl;
 
 import com.example.Spotify.dto.SearchResultDTO;
+import com.example.Spotify.dto.SongChunkDTO;
 import com.example.Spotify.dto.SongPlayDTO;
 import com.example.Spotify.dto.SongSearchDTO;
+import com.example.Spotify.dto.SongStreamMetadataDTO;
 import com.example.Spotify.exceptions.ResourceNotFoundException;
 import com.example.Spotify.model.*;
 import com.example.Spotify.repository.*;
+import com.example.Spotify.service.AudioChunkingService;
 import com.example.Spotify.service.FileService;
 import com.example.Spotify.service.FileStorageService;
 import com.example.Spotify.service.SongService;
@@ -39,6 +42,7 @@ public class SongServiceImpl implements SongService {
     private final UserRepository userRepository;
     private final SongInfoRepository songInfoRepository;
     private final LikeDislikeSongRepository likeDislikeSongRepository;
+    private final AudioChunkingService audioChunkingService;
 
     @Override
     @Transactional
@@ -46,26 +50,16 @@ public class SongServiceImpl implements SongService {
         try {
             log.info("Starting upload process for song: {}", title);
 
-            // Upload audio file
-            FileStorageService.FileUploadResult audioResult = fileStorageService.storeAudioFile(songFile, title);
-            if (!audioResult.isSuccess()) {
-                log.error("Failed to upload audio file: {}", audioResult.getErrorMessage());
-                return SongUploadResult.error("Audio upload failed: " + audioResult.getErrorMessage());
-            }
-
-            // Upload cover image
+            // Upload cover image first
             FileStorageService.FileUploadResult coverResult = fileStorageService.storeImageFile(coverImageFile, title);
             if (!coverResult.isSuccess()) {
                 log.error("Failed to upload cover image: {}", coverResult.getErrorMessage());
-                // Clean up audio file
-                fileStorageService.deleteFile(audioResult.getFilePath());
                 return SongUploadResult.error("Cover upload failed: " + coverResult.getErrorMessage());
             }
 
-            // Create song info in database
+            // Create song info in database first (without audio URL)
             SongInfo songInfo = SongInfo.builder()
                     .title(title)
-                    .songURL(audioResult.getFilePath())
                     .songCoverURL(coverResult.getFilePath())
                     .likes(0)
                     .dislikes(0)
@@ -74,16 +68,118 @@ public class SongServiceImpl implements SongService {
                     .isPremium(false)
                     .likedDislikedSongs(new ArrayList<>())
                     .songPlaylistRelations(new ArrayList<>())
+                    .songChunks(new ArrayList<>())
                     .build();
 
             songInfo = songInfoRepository.save(songInfo);
 
-            log.info("Song uploaded successfully: {} with ID: {}", title, songInfo.getId());
+            // Chunk the audio file
+            AudioChunkingService.ChunkingResult chunkingResult =
+                audioChunkingService.chunkAudioFile(songFile, songInfo, 10.0);
+
+            if (!chunkingResult.isSuccess()) {
+                log.error("Failed to chunk audio file: {}", chunkingResult.getErrorMessage());
+                // Clean up cover file and song info
+                fileStorageService.deleteFile(coverResult.getFilePath());
+                songInfoRepository.deleteById(songInfo.getId());
+                return SongUploadResult.error("Audio chunking failed: " + chunkingResult.getErrorMessage());
+            }
+
+            // Update song info with duration
+            songInfo.setDurationSeconds(chunkingResult.getTotalDurationSeconds());
+            songInfo = songInfoRepository.save(songInfo);
+
+            log.info("Song uploaded and chunked successfully: {} with ID: {}, {} chunks created",
+                    title, songInfo.getId(), chunkingResult.getChunks().size());
             return SongUploadResult.success(songInfo);
 
         } catch (Exception e) {
             log.error("Unexpected error during song upload: {}", title, e);
             return SongUploadResult.error("Upload failed due to unexpected error: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public SongStreamMetadataDTO getSongStreamMetadata(Long songId) {
+        try {
+            Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
+            if (songInfoOpt.isEmpty()) {
+                throw new ResourceNotFoundException("Song not found with ID: " + songId);
+            }
+
+            SongInfo songInfo = songInfoOpt.get();
+            List<SongChunk> chunks = audioChunkingService.getChunksMetadata(songId);
+
+            // Load cover file
+            Resource coverFile = fileStorageService.loadFileAsResource(songInfo.getSongCoverURL());
+            String coverBase64 = encodeFileToBase64(coverFile);
+
+            // Build chunk metadata
+            List<SongStreamMetadataDTO.ChunkMetadata> chunkMetadataList = chunks.stream()
+                .map(chunk -> SongStreamMetadataDTO.ChunkMetadata.builder()
+                    .chunkIndex(chunk.getChunkIndex())
+                    .durationSeconds(chunk.getDurationSeconds())
+                    .startTimeSeconds(chunk.getStartTimeSeconds())
+                    .endTimeSeconds(chunk.getEndTimeSeconds())
+                    .build())
+                .toList();
+
+            return SongStreamMetadataDTO.builder()
+                    .songId(songInfo.getId())
+                    .name(songInfo.getTitle())
+                    .cover(coverBase64)
+                    .totalDurationSeconds(songInfo.getDurationSeconds())
+                    .totalChunks((long) chunks.size())
+                    .chunks(chunkMetadataList)
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Error getting stream metadata for song ID: {}", songId, e);
+            throw new RuntimeException("Failed to get stream metadata: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public SongChunkDTO getChunk(Long songId, Integer chunkIndex) {
+        try {
+            Optional<SongInfo> songInfoOpt = songInfoRepository.findById(songId);
+            if (songInfoOpt.isEmpty()) {
+                throw new ResourceNotFoundException("Song not found with ID: " + songId);
+            }
+
+            List<SongChunk> chunks = audioChunkingService.getChunksMetadata(songId);
+            SongChunk requestedChunk = chunks.stream()
+                .filter(chunk -> chunk.getChunkIndex().equals(chunkIndex))
+                .findFirst()
+                .orElse(null);
+
+            if (requestedChunk == null) {
+                throw new ResourceNotFoundException("Chunk not found: songId=" + songId + ", chunkIndex=" + chunkIndex);
+            }
+
+            String chunkData = audioChunkingService.getChunkAsBase64(songId, chunkIndex);
+            if (chunkData == null) {
+                throw new RuntimeException("Failed to load chunk data");
+            }
+
+            // Increment play count only for the first chunk (index 0)
+            if (chunkIndex == 0) {
+                SongInfo songInfo = songInfoOpt.get();
+                songInfo.setPlayCount(songInfo.getPlayCount() + 1);
+                songInfoRepository.save(songInfo);
+            }
+
+            return SongChunkDTO.builder()
+                    .chunkIndex(requestedChunk.getChunkIndex())
+                    .durationSeconds(requestedChunk.getDurationSeconds())
+                    .startTimeSeconds(requestedChunk.getStartTimeSeconds())
+                    .endTimeSeconds(requestedChunk.getEndTimeSeconds())
+                    .chunkData(chunkData)
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Error getting chunk: songId={}, chunkIndex={}", songId, chunkIndex, e);
+            throw new RuntimeException("Failed to get chunk: " + e.getMessage());
         }
     }
 
@@ -291,6 +387,9 @@ public class SongServiceImpl implements SongService {
             SongInfo songInfo = songInfoOpt.get();
             String songTitle = songInfo.getTitle();
 
+            // Delete chunks first
+            audioChunkingService.deleteChunks(songId);
+
             // Delete associated files
             boolean audioDeleted = true;
             boolean coverDeleted = true;
@@ -309,15 +408,15 @@ public class SongServiceImpl implements SongService {
                 }
             }
 
-            // Delete database record
+            // Delete database record (this will cascade delete chunks due to orphanRemoval = true)
             songInfoRepository.deleteById(songId);
 
-            String result = "Song '" + songTitle + "' deleted successfully";
+            String result = "Song '" + songTitle + "' and its chunks deleted successfully";
             if (!audioDeleted || !coverDeleted) {
                 result += " (some files could not be deleted)";
             }
 
-            log.info("Song deleted: {} (ID: {})", songTitle, songId);
+            log.info("Song and chunks deleted: {} (ID: {})", songTitle, songId);
             return result;
 
         } catch (Exception e) {

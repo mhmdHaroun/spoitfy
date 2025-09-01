@@ -1,7 +1,9 @@
 package com.example.Spotify.controller;
 
 import com.example.Spotify.dto.SearchResultDTO;
+import com.example.Spotify.dto.SongChunkDTO;
 import com.example.Spotify.dto.SongPlayDTO;
+import com.example.Spotify.dto.SongStreamMetadataDTO;
 import com.example.Spotify.model.SongInfo;
 import com.example.Spotify.service.SongService;
 import lombok.RequiredArgsConstructor;
@@ -94,6 +96,26 @@ public class SongController {
             @RequestParam Long songId
     ) {
         return ResponseEntity.ok(songService.streamSong(songId));
+    }
+
+    // New chunked streaming endpoints
+    @GetMapping("/stream/metadata")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<SongStreamMetadataDTO> getStreamMetadata(
+            @RequestParam Long songId
+    ) {
+        log.info("Stream metadata request for song ID: {}", songId);
+        return ResponseEntity.ok(songService.getSongStreamMetadata(songId));
+    }
+
+    @GetMapping("/stream/chunk")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<SongChunkDTO> getChunk(
+            @RequestParam Long songId,
+            @RequestParam Integer chunkIndex
+    ) {
+        log.debug("Chunk request for song ID: {}, chunk: {}", songId, chunkIndex);
+        return ResponseEntity.ok(songService.getChunk(songId, chunkIndex));
     }
 
     @PutMapping("/like/{songId}/{userId}")

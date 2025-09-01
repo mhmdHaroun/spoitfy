@@ -34,6 +34,7 @@ public class SongInfo {
     private boolean isPremium;
     private int popularity;
     private String genre;
+    private Double durationSeconds; // Total duration of the song
 
     @OneToMany(mappedBy = "songInfo", cascade = CascadeType.ALL)
     @JsonIgnore
@@ -58,4 +59,8 @@ public class SongInfo {
     @OneToMany(mappedBy = "songInfo", cascade = CascadeType.ALL)
     @JsonIgnore
     private List<UserSongContinue> userSongContinues = new ArrayList<>();
+
+    @OneToMany(mappedBy = "songInfo", cascade = CascadeType.ALL, orphanRemoval = true)
+    @JsonIgnore
+    private List<SongChunk> songChunks = new ArrayList<>();
 }

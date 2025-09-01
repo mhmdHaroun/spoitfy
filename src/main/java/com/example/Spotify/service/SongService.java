@@ -1,7 +1,9 @@
 package com.example.Spotify.service;
 
 import com.example.Spotify.dto.SearchResultDTO;
+import com.example.Spotify.dto.SongChunkDTO;
 import com.example.Spotify.dto.SongPlayDTO;
+import com.example.Spotify.dto.SongStreamMetadataDTO;
 import com.example.Spotify.model.SongInfo;
 import org.springframework.core.io.Resource;
 import org.springframework.web.multipart.MultipartFile;
@@ -34,6 +36,9 @@ public interface SongService {
     }
 
     SongUploadResult uploadSongWithCover(MultipartFile songFile, MultipartFile coverImageFile, String title);
+
+    SongStreamMetadataDTO getSongStreamMetadata(Long songId);
+    SongChunkDTO getChunk(Long songId, Integer chunkIndex);
 
     @Deprecated
     void addSongAndCover(MultipartFile songFile, MultipartFile coverImageFile, String name);
